@@ -1,0 +1,142 @@
+\documentclass[a4paper]{article}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+% vim: ts=2 sw=2 noet
+
+\newcommand{\F}[1]{\mathrm{GF} ({#1})}
+% enclose element in braces.
+\newcommand{\be}[1]{\{{#1}\}}
+\makeatletter
+\lstnewenvironment{c++}[1][]{%
+	\lstset{%
+		#1,
+		language=c++,
+		numbers=left,
+		firstnumber=auto,
+		tabsize=1,
+		basicstyle=\small\ttfamily,
+		mathescape=true,
+	}%
+		\csname\@lst @SetFirstNumber\endcsname
+	}{%
+		\csname \@lst @SaveFirstNumber\endcsname
+	}
+\makeatother
+
+\title{Commentary on the Bech32 Polynomial Generator Function}
+\date{July 2017}
+\author{Pieter Wuille}
+\begin{document}
+\maketitle
+This function will compute what six five-bit values to XOR ($\oplus$) into the
+last six input values, in order to make the checksum 0.
+These six values are packed together in a single 30-bit integer.
+The higher bits correspond to earlier values.
+\begin{c++}[name=Code]
+uint32_t polymod(const data& values)
+{
+\end{c++}
+The input is interpreted as a list of coefficients of a polynomial over
+$F = \F{32}$, with an implicit 1 in front. If the input is
+$[v_0, v_1, v_2, v_3, v_4]$, that polynomial is
+\begin{equation*}
+	v(x) = 1x^5 + v_0x^4 + v_1x^3 + v_2x^2 + v_3x + v_4.
+\end{equation*}
+The implicit 1 guarantees that $[v_0, v_1, v_2, \ldots]$ has a distinct checksum
+from $[0, v_0, v_1, v_2, \ldots]$.
+
+The output is a 30-bit integer whose 5-bit groups are the coefficients of the
+remainder of $v(x) \mod g(x)$, where $g(x)$ is the Bech32 generator:
+\begin{equation}
+  g(x) = x^6 + 29x^5 + 22x^4 + 20x^3 + 21x^2 + 29x + 18.
+\end{equation}
+$g(x)$ is chosen in such a way that the resulting code is a BCH code,
+guaranteeing detection of up to three errors within a window of 1023 characters.
+Among the various possible BCH codes, one was selected to in fact guarantee
+detection of up to 4 errors within a window of 89 characters.
+
+Note that the coefficients are elements of $\F{32}$, here represented as decimal
+numbers between $\{\}$.
+In this finite field, addition is just XOR of the corresponding numbers.
+For example, $\be{27} + \be{13} = \be{27} \oplus \be{13} = \be{22}$.
+Multiplication is more complicated, and requires treating the bits of values
+themselves as coefficients of a polynomial over a smaller field, $\F{2}$, and
+multiplying those polynomials $\mod a^5 + a^3 + 1$. 
+For example:
+\begin{align*}
+	5 \cdot 26	&= (a^2 + 1) \cdot (a^4 + a^3 + a) \\
+			&= (a^4 + a^3 + a) \cdot a^2 + (a^4 + a^3 + a) \\
+			&= a^6 + a^5 + a^4 + a \\
+			&= a^3 + 1 \pmod{a^5 + a^3 + 1} \\
+      &= \be{9}.
+\end{align*}
+
+During the course of the loop below, \texttt{c} contains the bitpacked coefficients of
+the polynomial constructed from just the values of $v$ that were processed so far,
+$\mod g(x)$.
+In the above example, \texttt{c} initially corresponds to $1 \mod g(x)$, and
+after processing 2 inputs of $v$, it corresponds to $x^2 + v_0x + v_1 \mod g(x)$.
+As $1 \mod g(x) = 1$, that is the starting value for \texttt{c}.
+\begin{c++}[name=Code]
+	uint32_t c = 1;
+	for (const auto $v_i$ : values) {
+\end{c++}
+We want to update \texttt{c} to correspond to a polynomial with one extra term.
+If the initial value of \texttt{c} consists of the coefficients of
+$c(x) = f(x) \mod g(x)$, we modify it to correspond to
+$c'(x) = (f(x) \cdot x + v_i) \mod g(x)$, where $v_i$ is the next input to process.
+Simplifying:
+\begin{equation}
+\begin{aligned}
+	c'(x)	&= (f(x) \cdot x + v_i) \mod g(x) \\
+		&= ((f(x) \mod g(x)) \cdot x + v_i) \mod g(x) \\
+		&= (c(x) \cdot x  + v_i) \mod g(x)
+\end{aligned}
+\end{equation}
+If
+\begin{equation*}
+	c(x) = c_0x^5 + c_1x^4 + c_2x^3 + c_3x^2 + c_4x + c_5, 
+\end{equation*}
+we want to compute:
+\begin{equation*}
+\begin{aligned}
+	c'(x)	&= (c_0x^5 + c_1x^4 + c_2x^3 + c_3x^2 + c_4x + c_5) \cdot x + v_i \mod g(x) \\
+		&= c_0x^6 + c_1x^5 + c_2x^4 + c_3x^3 + c_4x^2 + c_5x + v_i \mod g(x) \\
+		&= c_0(x^6 \mod g(x)) + c_1x^5 + c_2x^4 + c_3x^3 + c_4x^2 + c_5x + v_i
+\end{aligned}
+\end{equation*}
+If we call $(x^6 \mod g(x)) = k(x)$, this can be written as:
+\begin{equation*}
+	c'(x)	= (c_1x^5 + c_2x^4 + c_3x^3 + c_4x^2 + c_5x + v_i) + c_0k(x)
+\end{equation*}
+
+First, determine the value of $c_0$:
+\begin{c++}[name=Code]
+		uint8_t $c_0$ = c >> 25;
+\end{c++}
+Then compute $c_1x^5 + c_2x^4 + c_3x^3 + c_4x^2 + c_5x + v_i$:
+\begin{c++}[name=Code]
+		c = ((c & 0x1FFFFFF) << 5) ^ $v_i$;
+\end{c++}
+Finally, for each set bit $n$ in $c_0$, conditionally add ${2^n}k(x)$:
+\begin{equation*}
+\begin{aligned}
+       k(x) &= \be{29}x^5 + \be{22}x^4 + \be{20}x^3 + \be{21}x^2 + \be{29}x + \be{18} \\
+ \be{2}k(x) &= \be{19}x^5 +  \be{5}x^4 +        x^3 +  \be{3}x^2 + \be{19}x + \be{13} \\
+ \be{4}k(x) &= \be{15}x^5 + \be{10}x^4 +  \be{2}x^3 +  \be{6}x^2 + \be{15}x + \be{26} \\ 
+ \be{8}k(x) &= \be{30}x^5 + \be{20}x^4 +  \be{4}x^3 + \be{12}x^2 + \be{30}x + \be{29} \\
+\be{16}k(x) &= \be{21}x^5 +        x^4 +  \be{8}x^3 + \be{24}x^2 + \be{21}x + \be{19} \\
+\end{aligned}
+\end{equation*}
+\begin{c++}[name=Code]
+		if ($c_0$ & 1 )  c ^= 0x3b6a57b2;
+		if ($c_0$ & 2 )  c ^= 0x26508e6d;
+		if ($c_0$ & 4 )  c ^= 0x1ea119fa;
+		if ($c_0$ & 8 )  c ^= 0x3d4233dd;
+		if ($c_0$ & 16)  c ^= 0x2a1462b3;
+	}
+	return c;
+}
+\end{c++}
+\end{document}
