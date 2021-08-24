@@ -88,20 +88,14 @@ const testing = std.testing;
 /// NoSeperator
 /// : The seperator "1" wasn't found in source.
 ///
+/// BadChar
+/// : A character in the string is outside the valid range.
+///
 /// HRPEmpty, HRPTooLong
 /// : The HRP provided is empty, or larger than max_hrp_size.
 ///
-/// HRPBadChar
-/// : A character in the HRP is outside the valid range.
-///
-/// DataBadChar
-/// : A character in the data section was outside of the Bech32 charset.
-///
 /// ChecksumEmpty
 /// : The six checksum digits at the end weren't found.
-///
-/// ChecksumBadChar
-/// : A character in the checksum was outside of the Bech32 charset.
 ///
 /// Invalid
 /// : The checksum did not equal 1 at the end of decoding.
@@ -109,13 +103,11 @@ pub const Error = error{
     TooLong,
     MixedCase,
     NoSeperator,
+    BadChar,
     HRPEmpty,
     HRPTooLong,
-    HRPBadChar,
-    DataBadChar,
     InvalidPadding,
     ChecksumEmpty,
-    ChecksumBadChar,
     Invalid,
 };
 
@@ -344,9 +336,7 @@ pub fn Bech32Decoder(set: [32]u8) type {
             for (hrp) |c, i| {
                 var lc = c;
                 switch (c) {
-                    0...32, 127...255 => {
-                        return error.HRPBadChar;
-                    },
+                    0...32, 127...255 => return error.BadChar,
                     'A'...'Z' => {
                         upper = true;
                         lc |= 0b00100000;
@@ -364,13 +354,10 @@ pub fn Bech32Decoder(set: [32]u8) type {
 
             var convert_buf: [max_data_len]u5 = undefined;
             for (data) |c, i| {
-                if (std.ascii.isUpper(c)) {
-                    upper = true;
-                } else if (std.ascii.isLower(c)) {
-                    lower = true;
-                }
+                if (std.ascii.isUpper(c)) upper = true;
+                if (std.ascii.isLower(c)) lower = true;
 
-                const rev = reverse_charset[c] orelse return error.DataBadChar;
+                const rev = reverse_charset[c] orelse return error.BadChar;
                 polymod.step(rev);
                 convert_buf[i] = rev;
             }
@@ -379,13 +366,10 @@ pub fn Bech32Decoder(set: [32]u8) type {
             res.data = try fiveToEight(dest, convert_buf[0..data.len]);
 
             for (checksum) |c| {
-                if (std.ascii.isUpper(c)) {
-                    upper = true;
-                } else if (std.ascii.isLower(c)) {
-                    lower = true;
-                }
+                if (std.ascii.isUpper(c)) upper = true;
+                if (std.ascii.isLower(c)) lower = true;
 
-                const rev = reverse_charset[c] orelse return error.ChecksumBadChar;
+                const rev = reverse_charset[c] orelse return error.BadChar;
                 polymod.step(rev);
             }
             if (upper and lower) return error.MixedCase;
@@ -425,43 +409,39 @@ const good_strings = [_][]const u8{
     "11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j",
     "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w",
 };
-const Bad = struct {
-    str: []const u8,
-    err: anyerror,
-
-    fn new(str: []const u8, err: anyerror) Bad {
-        return Bad{ .str = str, .err = err };
-    }
-};
+const Bad = struct { str: []const u8, err: anyerror };
+fn new(str: []const u8, err: anyerror) Bad {
+    return Bad{ .str = str, .err = err };
+}
 const bad_strings = [_]Bad{
     // Invalid checksum
-    Bad.new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
-    Bad.new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
+    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
+    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
     // Invalid character (space) and (DEL) in hrp
-    Bad.new("s lit1checkupstagehandshakeupstreamerranterredcaperredp8hs2p", error.HRPBadChar),
-    Bad.new("spl\x7ft1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.HRPBadChar),
+    new("s lit1checkupstagehandshakeupstreamerranterredcaperredp8hs2p", error.BadChar),
+    new("spl\x7ft1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.BadChar),
     // Invalid character (o) in data part
-    Bad.new("split1cheo2y9e2w", error.DataBadChar),
+    new("split1cheo2y9e2w", error.BadChar),
     // Short checksum.
-    Bad.new("split1a2y9w", error.ChecksumEmpty),
+    new("split1a2y9w", error.ChecksumEmpty),
     // Empty hrp
-    Bad.new("1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.HRPEmpty),
+    new("1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.HRPEmpty),
     // Too long
-    Bad.new("11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j", error.TooLong),
+    new("11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j", error.TooLong),
     // Mixed case HRP, data and checksum.
-    Bad.new("Foo1999999", error.MixedCase),
-    Bad.new("foo1qQzzzzzz", error.MixedCase),
-    Bad.new("foo1qzzzzzZ", error.MixedCase),
+    new("Foo1999999", error.MixedCase),
+    new("foo1qQzzzzzz", error.MixedCase),
+    new("foo1qzzzzzZ", error.MixedCase),
     // BIP 173 invalid vectors.
-    Bad.new("\x201nwldj5", error.HRPBadChar),
-    Bad.new("an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx", error.TooLong),
-    Bad.new("pzry9x0s0muk", error.NoSeperator),
-    Bad.new("1pzry9x0s0muk", error.HRPEmpty),
-    Bad.new("x1b4n0q5v", error.DataBadChar),
-    Bad.new("li1dgmt3", error.ChecksumEmpty),
-    Bad.new("de1lg7wt\xff", error.ChecksumBadChar),
+    new("\x201nwldj5", error.BadChar),
+    new("an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx", error.TooLong),
+    new("pzry9x0s0muk", error.NoSeperator),
+    new("1pzry9x0s0muk", error.HRPEmpty),
+    new("x1b4n0q5v", error.BadChar),
+    new("li1dgmt3", error.ChecksumEmpty),
+    new("de1lg7wt\xff", error.BadChar),
     // checksum calculated with uppercase form of HRP.
-    Bad.new("A1G7SGD8", error.Invalid),
-    Bad.new("10a06t8", error.HRPEmpty),
-    Bad.new("1qzzfhee", error.HRPEmpty),
+    new("A1G7SGD8", error.Invalid),
+    new("10a06t8", error.HRPEmpty),
+    new("1qzzfhee", error.HRPEmpty),
 };
