@@ -161,7 +161,7 @@ const Polymod = struct {
     }
 };
 
-pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
+pub fn Bech32Encoder(comptime set: [32]u8, comptime uppercase: bool) type {
     return struct {
         const charset = if (!uppercase) set else blk: {
             var buf: [32]u8 = undefined;
@@ -269,7 +269,7 @@ pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
 }
 
 pub const Result = struct { hrp: []const u8, data: []const u8 };
-pub fn Bech32Decoder(set: [32]u8) type {
+pub fn Bech32Decoder(comptime set: [32]u8) type {
     return struct {
         const reverse_charset = blk: {
             var buf = [_]?u5{null} ** 256;
