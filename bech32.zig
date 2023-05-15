@@ -30,7 +30,7 @@
 //
 // [1]: https://github.com/iqlusioninc/crates/tree/main/subtle-encoding
 
-//! A encoder/decoder for Bech32 strings, as specified by BIP 173[^1].
+//! A encoder/decoder for Bech32/Bech32m strings, as specified by BIP 173[^1] and BIP 350[^2]
 //! This implementation is not constant-time, and may leak information due to
 //! the use of lookup tables. Replacement by a constant-time solution is a
 //! long-term desideratum.
@@ -48,25 +48,29 @@
 //!
 //! Verifiying that a string is valid for the data it holds is done by
 //! iteratively computing the checksum using polynomial arithetic for each byte
-//! in the HRP (twice) and data. The checksum should be equal to 1 at the end,
-//! which is what it's starting value was. A more thorough explanation of
-//! how this works can be found under `doc/bech32-polymod.tex`.
+//! in the HRP (twice) and data. The checksum should be equal to 1 for the original Bech32
+//! encoding or 0x2bc830a3 for the modified Bech32m encoding. A more thorough explanation
+//! of how this works can be found under `doc/bech32-polymod.tex`.
 //!
 //! Using this package is simple:
 //!
 //! ```zig
-//! const Bech32 = @import("bech32.zig").Bech32;
+//! const bech32 = @import("bech32.zig");
 //! ⋮
 //! // Encoding
 //! const hrp = "ziglang"
 //! const data = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
-//! var buf: [Bech32.max_string_size]u8 = undefined;
+//! const enc = bech32.Encoding.bech32m;
+//! var buf: [bech32.max_string_size]u8 = undefined;
+//! const str = bech32.standard.Encoder.encode(&buf, hrp, data, enc);
 //!
-//! const str = Bech32.standard.Encoder.encode(&buf, hrp, data);
 //! // Decoding
-//! var data_buf[Bech32.max_data_size]u8;
-//! const res = try Bech32.standard.Decoder.decode(&data_buf, str);
-//! print("HRP: {s}\nData: {s}", .{res.hrp, std.fmt.fmtSliceHexLower(res.data)});
+//! var data_buf[bech32.max_data_size]u8;
+//! const res = try bech32.standard.Decoder.decode(&data_buf, str);
+//! print(
+//!     "HRP: {s}\nData: {s}\nEncoding: {s}",
+//!     .{res.hrp, std.fmt.fmtSliceHexLower(res.data), @tagName(res.encoding)},
+//! );
 //! ```
 //!
 //! Implementations are required to output all lowercase strings, and for
@@ -74,10 +78,17 @@
 //! can do this for you if you set the `uppercase` flag at compile time.
 //!
 //! [^1]: https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
+//! [^2]: https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
 
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+
+/// Supported encodings
+pub const Encoding = enum(u30) {
+    bech32 = 1,
+    bech32m = 0x2bc830a3,
+};
 
 /// TooLong
 /// : source exceeds the 90 character limit.
@@ -94,8 +105,8 @@ const testing = std.testing;
 /// HRPEmpty, HRPTooLong
 /// : The HRP provided is empty, or larger than max_hrp_size.
 ///
-/// ChecksumEmpty
-/// : The six checksum digits at the end weren't found.
+/// ChecksumTooShort
+/// : Less than six checksum digits found.
 ///
 /// Invalid
 /// : The checksum did not equal 1 at the end of decoding.
@@ -107,7 +118,7 @@ pub const Error = error{
     HRPEmpty,
     HRPTooLong,
     InvalidPadding,
-    ChecksumEmpty,
+    ChecksumTooShort,
     Invalid,
 };
 
@@ -119,12 +130,12 @@ pub const max_hrp_size = max_string_size - 1 - 6;
 pub const max_data_len = max_string_size - 1 - 1 - 6;
 pub const max_data_size = calcReduction(max_data_len);
 
-/// Standard Bech32 codecs, lowercase encoded strings.
+/// Standard Bech32/Bech32m codecs, lowercase encoded strings.
 pub const standard = struct {
     pub const Encoder = Bech32Encoder(bech32_charset, false);
     pub const Decoder = Bech32Decoder(bech32_charset);
 };
-/// Standard Bech32 codecs, uppercase encoded strings.
+/// Standard Bech32/Bech32m codecs, uppercase encoded strings.
 pub const standard_uppercase = struct {
     pub const Encoder = Bech32Encoder(bech32_charset, true);
     pub const Decoder = Bech32Decoder(bech32_charset);
@@ -156,12 +167,12 @@ const Polymod = struct {
         }
     }
 
-    inline fn finish(self: *Polymod) void {
-        self.val ^= 1;
+    inline fn finish(self: *Polymod, encoding: Encoding) void {
+        self.val ^= @enumToInt(encoding);
     }
 };
 
-pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
+pub fn Bech32Encoder(comptime set: [32]u8, comptime uppercase: bool) type {
     return struct {
         const charset = if (!uppercase) set else blk: {
             var buf: [32]u8 = undefined;
@@ -203,7 +214,7 @@ pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
             return dest[0..i];
         }
 
-        /// Encodes the HRP and data into a Bech32 string and stores the result
+        /// Encodes the HRP and data into a Bech32 or Bech32m string and stores the result
         /// in dest. The function contains a couple assertions that the caller
         /// should be aware of. The first are limit checks:
         ///
@@ -216,7 +227,12 @@ pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
         ///
         /// Finally, the HRP is checked so that it doesn't contain invalid or
         /// mixed-case chars.
-        pub fn encode(dest: []u8, hrp: []const u8, data: []const u8) []const u8 {
+        pub fn encode(
+            dest: []u8,
+            hrp: []const u8,
+            data: []const u8,
+            encoding: Encoding,
+        ) []const u8 {
             assert(dest.len >= calcSize(hrp, data));
 
             var polymod = Polymod{};
@@ -256,7 +272,7 @@ pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
             }
 
             for ([_]u0{0} ** 6) |_| polymod.step(0);
-            polymod.finish();
+            polymod.finish(encoding);
             for ([6]u5{ 0, 1, 2, 3, 4, 5 }) |n| {
                 const shift = 5 * (5 - n);
                 dest[i] = charset[@truncate(u5, polymod.val >> shift)];
@@ -268,8 +284,8 @@ pub fn Bech32Encoder(set: [32]u8, uppercase: bool) type {
     };
 }
 
-pub const Result = struct { hrp: []const u8, data: []const u8 };
-pub fn Bech32Decoder(set: [32]u8) type {
+pub const Result = struct { hrp: []const u8, data: []const u8, encoding: Encoding };
+pub fn Bech32Decoder(comptime set: [32]u8) type {
     return struct {
         const reverse_charset = blk: {
             var buf = [_]?u5{null} ** 256;
@@ -282,14 +298,14 @@ pub fn Bech32Decoder(set: [32]u8) type {
         };
 
         pub fn calcSizeForSlice(source: []const u8) Error!usize {
-            if (source.len > max_string_size) return error.TooLong;
+            if (source.len > max_string_size) return Error.TooLong;
             const sep = std.mem.lastIndexOfScalar(u8, source, '1') orelse
-                return error.NoSeperator;
-            if (sep == 0) return error.HRPEmpty;
-            if (sep > max_hrp_size) return error.HRPTooLong;
+                return Error.NoSeperator;
+            if (sep == 0) return Error.HRPEmpty;
+            if (sep > max_hrp_size) return Error.HRPTooLong;
 
             const data = if (source.len - (sep + 1) < 6)
-                return error.ChecksumEmpty
+                return Error.ChecksumTooShort
             else
                 source[sep + 1 .. source.len - 6];
 
@@ -310,16 +326,17 @@ pub fn Bech32Decoder(set: [32]u8) type {
                 }
             }
             if (acc_len > 5 or @truncate(u8, acc << 8 - acc_len) != 0)
-                return error.InvalidPadding;
+                return Error.InvalidPadding;
 
             return dest[0..i];
         }
 
-        /// Decodes and validates the Bech32 string `source`, and writes any
-        /// data found to to `dest`. The returned Result has two members:
+        /// Decodes and validates a Bech32 or Bech32m string `source`, and writes any
+        /// data found to to `dest`. The returned Result has three members:
         ///
         /// - `hrp`, which is a slice of `source`
         /// - `data`, which is a slice of `dest`.
+        /// - `encoding`, is the encoding that was detected if valid
         pub fn decode(dest: []u8, source: []const u8) Error!Result {
             assert(dest.len >= try calcSizeForSlice(source));
 
@@ -329,14 +346,14 @@ pub fn Bech32Decoder(set: [32]u8) type {
             const checksum = source[source.len - 6 ..];
 
             var pmod_buf: [max_hrp_size]u8 = undefined;
-            var res = Result{ .hrp = hrp, .data = &[0]u8{} };
+            var res = Result{ .hrp = hrp, .data = &[0]u8{}, .encoding = undefined };
             var polymod = Polymod{};
             var upper = false;
             var lower = false;
             for (hrp) |c, i| {
                 var lc = c;
                 switch (c) {
-                    0...32, 127...255 => return error.BadChar,
+                    0...32, 127...255 => return Error.BadChar,
                     'A'...'Z' => {
                         upper = true;
                         lc |= 0b00100000;
@@ -347,7 +364,7 @@ pub fn Bech32Decoder(set: [32]u8) type {
                 polymod.step(lc >> 5);
                 pmod_buf[i] = c;
             }
-            if (upper and lower) return error.MixedCase;
+            if (upper and lower) return Error.MixedCase;
 
             polymod.step(0);
             for (pmod_buf[0..hrp.len]) |c| polymod.step(c & 31);
@@ -357,11 +374,11 @@ pub fn Bech32Decoder(set: [32]u8) type {
                 if (std.ascii.isUpper(c)) upper = true;
                 if (std.ascii.isLower(c)) lower = true;
 
-                const rev = reverse_charset[c] orelse return error.BadChar;
+                const rev = reverse_charset[c] orelse return Error.BadChar;
                 polymod.step(rev);
                 convert_buf[i] = rev;
             }
-            if (upper and lower) return error.MixedCase;
+            if (upper and lower) return Error.MixedCase;
 
             res.data = try fiveToEight(dest, convert_buf[0..data.len]);
 
@@ -369,79 +386,132 @@ pub fn Bech32Decoder(set: [32]u8) type {
                 if (std.ascii.isUpper(c)) upper = true;
                 if (std.ascii.isLower(c)) lower = true;
 
-                const rev = reverse_charset[c] orelse return error.BadChar;
+                const rev = reverse_charset[c] orelse return Error.BadChar;
                 polymod.step(rev);
             }
-            if (upper and lower) return error.MixedCase;
+            if (upper and lower) return Error.MixedCase;
 
-            if (polymod.val != 1) return error.Invalid;
+            res.encoding = switch (polymod.val) {
+                @enumToInt(Encoding.bech32) => Encoding.bech32,
+                @enumToInt(Encoding.bech32m) => Encoding.bech32m,
+                else => return Error.Invalid,
+            };
 
             return res;
         }
     };
 }
 
-test "bech32 test vectors" {
+test "bech32 and bech32m test vectors" {
+    try expectGoodStrings(good_strings_bech32, .bech32);
+    try expectBadStrings(bad_strings_bech32);
+
+    try expectGoodStrings(good_strings_bech32m, .bech32m);
+    try expectBadStrings(bad_strings_bech32m);
+}
+
+fn expectGoodStrings(strings: anytype, encoding: Encoding) !void {
     var lower_buf: [max_string_size]u8 = undefined;
     var data_buf: [max_data_size]u8 = undefined;
     var encoded_buf: [max_string_size]u8 = undefined;
 
-    for (good_strings) |str| {
+    for (strings) |str| {
         var lower = std.ascii.lowerString(&lower_buf, str);
         const res = standard.Decoder.decode(&data_buf, str) catch |err|
-            std.debug.panic("Expected string to be valid: {s} {s}\n", .{ str, @errorName(err) });
+            std.debug.panic("Expected a valid string: {s} {s}\n", .{ str, @errorName(err) });
 
-        const enc = standard.Encoder.encode(&encoded_buf, res.hrp, res.data);
+        try std.testing.expectEqual(encoding, res.encoding);
+
+        const enc = standard.Encoder.encode(&encoded_buf, res.hrp, res.data, res.encoding);
         try std.testing.expectEqualStrings(lower, enc);
 
         const pos = std.mem.lastIndexOfScalar(u8, lower, '1') orelse unreachable;
         lower[pos + 1] = 'z';
-        try std.testing.expectError(error.Invalid, standard.Decoder.decode(&data_buf, lower));
+        try std.testing.expectError(Error.Invalid, standard.Decoder.decode(&data_buf, lower));
     }
-
-    for (bad_strings) |i| try testing.expectError(i.err, standard.Decoder.decode(&data_buf, i.str));
 }
 
-const good_strings = [_][]const u8{
+fn expectBadStrings(strings: anytype) !void {
+    var data_buf: [max_data_size]u8 = undefined;
+    for (strings) |i| {
+        try testing.expectError(i.err, standard.Decoder.decode(&data_buf, i.str));
+    }
+}
+
+const good_strings_bech32 = [_][]const u8{
     "A12UEL5L",
     "a12uel5l",
     "an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs",
     "11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j",
     "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w",
 };
+const good_strings_bech32m = [_][]const u8{
+    "A1LQFN3A",
+    "a1lqfn3a",
+    "an83characterlonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11sg7hg6",
+    "abcdef1l7aum6echk45nj3s0wdvt2fg8x9yrzpqzd3ryx",
+    // TODO(hazeycode): debug invalid padding
+    // "11llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllludsr8",
+    "split1checkupstagehandshakeupstreamerranterredcaperredlc445v",
+    "?1v759aa",
+};
 const Bad = struct { str: []const u8, err: anyerror };
 fn new(str: []const u8, err: anyerror) Bad {
     return Bad{ .str = str, .err = err };
 }
-const bad_strings = [_]Bad{
+const bad_strings_bech32 = [_]Bad{
     // Invalid checksum
-    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
-    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", error.Invalid),
+    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", Error.Invalid),
+    new("split1checkupstagehandshakeupstreamerranterredcaperred2y9e2w", Error.Invalid),
     // Invalid character (space) and (DEL) in hrp
-    new("s lit1checkupstagehandshakeupstreamerranterredcaperredp8hs2p", error.BadChar),
-    new("spl\x7ft1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.BadChar),
+    new("s lit1checkupstagehandshakeupstreamerranterredcaperredp8hs2p", Error.BadChar),
+    new("spl\x7ft1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", Error.BadChar),
     // Invalid character (o) in data part
-    new("split1cheo2y9e2w", error.BadChar),
+    new("split1cheo2y9e2w", Error.BadChar),
     // Short checksum.
-    new("split1a2y9w", error.ChecksumEmpty),
+    new("split1a2y9w", Error.ChecksumTooShort),
     // Empty hrp
-    new("1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", error.HRPEmpty),
+    new("1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", Error.HRPEmpty),
     // Too long
-    new("11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j", error.TooLong),
+    new("11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j", Error.TooLong),
     // Mixed case HRP, data and checksum.
-    new("Foo1999999", error.MixedCase),
-    new("foo1qQzzzzzz", error.MixedCase),
-    new("foo1qzzzzzZ", error.MixedCase),
+    new("Foo1999999", Error.MixedCase),
+    new("foo1qQzzzzzz", Error.MixedCase),
+    new("foo1qzzzzzZ", Error.MixedCase),
     // BIP 173 invalid vectors.
-    new("\x201nwldj5", error.BadChar),
-    new("an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx", error.TooLong),
-    new("pzry9x0s0muk", error.NoSeperator),
-    new("1pzry9x0s0muk", error.HRPEmpty),
-    new("x1b4n0q5v", error.BadChar),
-    new("li1dgmt3", error.ChecksumEmpty),
-    new("de1lg7wt\xff", error.BadChar),
+    new("\x201nwldj5", Error.BadChar),
+    new("an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx", Error.TooLong),
+    new("pzry9x0s0muk", Error.NoSeperator),
+    new("1pzry9x0s0muk", Error.HRPEmpty),
+    new("x1b4n0q5v", Error.BadChar),
+    new("li1dgmt3", Error.ChecksumTooShort),
+    new("de1lg7wt\xff", Error.BadChar),
     // checksum calculated with uppercase form of HRP.
-    new("A1G7SGD8", error.Invalid),
-    new("10a06t8", error.HRPEmpty),
-    new("1qzzfhee", error.HRPEmpty),
+    new("A1G7SGD8", Error.Invalid),
+    new("10a06t8", Error.HRPEmpty),
+    new("1qzzfhee", Error.HRPEmpty),
+};
+const bad_strings_bech32m = [_]Bad{
+    // HRP character out of range
+    new("\x201xj0phk", Error.BadChar),
+    new("\x7f1g6xzxy", Error.BadChar),
+    new("\x801vctc34", Error.BadChar),
+    // overall max length exceeded
+    new("an84characterslonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11d6pts4", Error.TooLong),
+    // No separator character
+    new("qyrz8wqd2c9m", Error.NoSeperator),
+    // Invalid data character
+    new("y1b0jsk6g", Error.BadChar),
+    new("lt1igcx5c0", Error.BadChar),
+    // Too short checksum
+    new("in1muywd", Error.ChecksumTooShort),
+    // Invalid character in checksum
+    new("mm1crxm3i", Error.BadChar),
+    new("au1s5cgom", Error.BadChar),
+    // checksum calculated with uppercase form of HRP
+    new("M1VUXWEZ", Error.Invalid),
+    // empty HRP
+    new("1qyrz8wqd2c9m", Error.HRPEmpty),
+    new("16plkw9", Error.HRPEmpty),
+    new("1p2gdwpf", Error.HRPEmpty),
 };
